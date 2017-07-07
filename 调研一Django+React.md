@@ -24,7 +24,7 @@
 在项目中我们还有一些文件，如/license等在此不赘述。
 
 ## 源代码核心分析
-#### redux
+## redux
 对于 redux 我们先了解几个概念  
 ##### action
 action是纯声明式的数据结构，只提供事件的所有要素，不提供逻辑。考虑下面这个action，他有一个类型type，AUTH_LOGIN_USER_SUCCESS，用户auth连接成功，还有一个payload{token，user}。这个action就告诉了我们发生“发生了什么”。
