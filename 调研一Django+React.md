@@ -24,7 +24,7 @@
 在项目中我们还有一些文件，如/license等在此不赘述。
 
 ## 源代码核心分析
-## redux
+#### redux
 对于 redux 我们先了解几个概念  
 ##### action
 action是纯声明式的数据结构，只提供事件的所有要素，不提供逻辑。考虑下面这个action，他有一个类型type，AUTH_LOGIN_USER_SUCCESS，用户auth连接成功，还有一个payload{token，user}。这个action就告诉了我们发生“发生了什么”。
@@ -218,5 +218,222 @@ export default(
                     <p>Attempt to access some <Link to="/protected"><b>protected content</b></Link>.</p>
 ~~~
 
+
+## Django+React.js前后端协作的API
+#### login时候的协作
+在login页面，从代码角度讲也就是/src/static/containers/Login/index.js 里的LoginView Component 的props里有：
+~~~
+        this.state = {
+            formValues: {
+                email: '',
+                password: ''
+            },
+            redirectTo: redirectRoute
+        };
+~~~
+
+其中的formValues顾名思意就是表单值，用来存我们登录的email和password。在 render()里代码如下：
+~~~
+        <Form ref={(ref) => { this.loginForm = ref; }}
+              type={Login}
+              options={LoginFormOptions}
+              value={this.state.formValues}
+              onChange={this.onFormChange}
+        />
+~~~
+当我们输入email和password的时候 会调用组件onFormChange函数更新组件里的formValues的值。
+~~~
+    onFormChange = (value) => {
+        this.setState({ formValues: value });
+    };
+~~~
+在点击了submit按钮后，他会调用组件的login()函数。
+~~~
+    login = (e) => {
+        e.preventDefault();
+        const value = this.loginForm.getValue();
+        if (value) {
+            this.props.actions.authLoginUser(value.email, value.password, this.state.redirectTo);
+        }
+    };
+~~~
+value被读取出来，当做component和redux 已经绑定的返回action 的工厂函数authLoginUser的参数。
+我们来看一下action uthLoginUser做了什么。
+~~~
+export function authLoginUser(email, password, redirect = '/') {
+    return (dispatch) => {
+        dispatch(authLoginUserRequest());
+~~~
+>他首先dispatch一个action authLoginUserRequest()
+~~~
+export function authLoginUserRequest() {
+    return {
+        type: AUTH_LOGIN_USER_REQUEST
+    };
+}
+~~~
+aciton对应的reducer 用会更新store里的state,然后这些状态讲变化传递到绑定的component里的props。比如当state里的isAuthenticating为true时，我们再去按submit就没有作用了。
+~~~
+export default createReducer(initialState, {
+    [AUTH_LOGIN_USER_REQUEST]: (state, payload) => {
+        return Object.assign({}, state, {
+            isAuthenticating: true,
+            statusText: null
+        });
+    },
+~~~
+>action authLoginUser() 接着将传过来的email和password编码后得到auth
+~~~
+        const auth = btoa(`${email}:${password}`);
+~~~
+>然后他就准备开始向后端传送数据。
+用的是fetch语句，指定了url和methed 还有报文头。我们的auth就放在头里。
+~~~
+        return fetch(`${SERVER_URL}/api/v1/accounts/login/`, {
+            method: 'post',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'Authorization': `Basic ${auth}`
+            }
+        })
+~~~
+>接下来后端收到了报文。
+~~~
+urlpatterns = [
+    url(r'^api/v1/accounts/', include('accounts.urls', namespace='accounts')),
+]
+urlpatterns = [
+    url(_(r'^login/$'),
+        accounts.views.UserLoginView.as_view(),
+        name='login'),
+]
+~~~
+根据两级的url匹配。django调用UserLoginView的post函数来处理报文
+>在post函数里django完成这个用户的登录，并返回这个token和user。 
+~~~
+class UserLoginView(GenericAPIView):
+    serializer_class = UserSerializer
+    authentication_classes = (BasicAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
+    def post(self, request):
+        """User login with username and password."""
+        token = AuthToken.objects.create(request.user)
+        return Response({
+            'user': self.get_serializer(request.user).data,
+            'token': token
+        })
+
+~~~
+  
+
+>这时候数据流就回到了前端的react。回到前面的返回action的工厂函数authLoginUser的后半部分。他收到包后先检查HttpStatus，然后对response进行json的解析。
+~~~
+            .then(checkHttpStatus)
+            .then(parseJSON)
+            .then((response) => {
+                dispatch(authLoginUserSuccess(response.token, response.user));
+                dispatch(push(redirect));
+            })
+            //中间略去一段异常处理的代码
+                return Promise.resolve(); // TODO: we need a promise here because of the tests, find a better way
+            });
+    };
+}
+~~~
+>然后用解析后得到的response.token, response.user做参数得到一个action。这个factory function 根据token和user设置了sessionStorage。然后返回的action被dispatch。 
+~~~
+export function authLoginUserSuccess(token, user) {
+    sessionStorage.setItem('token', token);
+    sessionStorage.setItem('user', JSON.stringify(user));
+    return {
+        type: AUTH_LOGIN_USER_SUCCESS,
+        payload: {
+            token,
+            user
+        }
+    };
+}
+~~~
+对应的reducer是
+~~~
+export default createReducer(initialState, {
+    [AUTH_LOGIN_USER_SUCCESS]: (state, payload) => {
+        return Object.assign({}, state, {
+            isAuthenticating: false,
+            isAuthenticated: true,
+            token: payload.token,
+            userName: payload.user.email,
+            statusText: 'You have been successfully logged in.'
+        });
+    },
+~~~
+更新store里的state。而且state会向下传递到绑定的componen里的props。   
+>返回action的工厂函数authLoginUser的最后部分是dispatch(push(redirect))。根据前端的react-route设置，网页会调回index。结束整个登录的过程。   
+
+至此整个登录流程的前后端交互到此结束。    
+
+#### Protected时候的协作
+根据react router当path为"protected"而且isAuthenticated为true时，就会跳转到component ProtectedView。   
+在组件渲染前会调用 componentWillMount()，会由factory function dataFetchProtectedData()产生一个action。
+~~~
+    componentWillMount() {
+        const token = this.props.token;
+        this.props.actions.dataFetchProtectedData(token);
+    }
+~~~
+>factory function dataFetchProtectedData()先dispatch(dataFetchProtectedDataRequest())，这个会通过reducer是store里的isFetching为true
+~~~
+export function dataFetchProtectedData(token) {
+    return (dispatch, state) => {
+        dispatch(dataFetchProtectedDataRequest());
+~~~
+>然后就是通过fetch语句向服务端发报文
+~~~
+        return fetch(`${SERVER_URL}/api/v1/getdata/`, {
+            credentials: 'include',
+            headers: {
+                Accept: 'application/json',
+                Authorization: `Token ${token}`
+            }
+        })
+~~~
+>django收到报文后根据url匹配
+~~~
+urlpatterns = [
+    url(r'',
+        base_views.ProtectedDataView.as_view(),
+        name='protected_data'),
+]
+~~~
+>调用ProtectedDataView的get()返回了data
+~~~
+class ProtectedDataView(GenericAPIView):
+    """Return protected data main page."""
+
+    authentication_classes = (TokenAuthentication,)
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        """Process GET request and return protected data."""
+
+        data = {
+            'data': 'THIS IS THE PROTECTED STRING FROM SERVER',
+        }
+
+        return Response(data, status=status.HTTP_200_OK)
+~~~
+>接着数据流回到前端。react factory function dataFetchProtectedData()接着执行。
+check了HttpStatus，json解析后得到数据，产生了action并进行dispatch。
+~~~
+            .then(checkHttpStatus)
+            .then(parseJSON)
+            .then((response) => {
+                dispatch(dataReceiveProtectedData(response.data));
+            })
+~~~
+对应的reducer更新store内的state然后，component ProtectedView里的state也被更新。然后进行了render，收到的信息'THIS IS THE PROTECTED STRING FROM SERVER'被显示到页面上某一预想位置上。
 # 总结和体会
-项目一是Django+React.js调研，搭建docker环境的时候遇到了很多问题。在看源码的时候，由于不懂js和html也遇到了很多问题。在这个项目中Django 除了根据request get一个response没多大印象了。React和redux的搭配使我印象深刻。顶层分发状态，让React组件被动地渲染。监听事件，事件有权利回到所有状态顶层影响状态。这个思想很巧妙。也非常利于我们工作上的使用。此外对react一些api有了了解。
+项目一是Django+React.js调研，搭建docker环境的时候遇到了很多问题。在看源码的时候，由于不懂js和html也遇到了很多问题。React和redux的搭配使我印象深刻。顶层分发状态，让React组件被动地渲染。监听事件，事件有权利回到所有状态顶层影响状态。这个思想很巧妙。也非常利于我们工作上的使用。此外对react一些api有了了解。   
+关于前后端api交互，react 做了很多路由的工作，所以与后端Django交互主要是交换信息。react通过一个action factory function里的fetch语句来往后台发送信息。经过Django里的url匹配后，后端调用对应的view class里的某些函数（如post，get）进行交互。信息发回到react端时，可以被扔进factory funcion里产生action再通过reducer来改变某些需要改变的state和组件信息。
